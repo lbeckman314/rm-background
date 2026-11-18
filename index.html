@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>rm background</title>
+    <meta
+      name="description"
+      content="Remove the background from photos, privately, in your browser."
+    />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✂️</text></svg>" />
+    <link rel="stylesheet" href="style.css" />
+    <script type="module" src="app.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>rm background</h1>
+        <p class="intro">
+          Cut out the subject of a photo, without uploading it anywhere. The
+          model runs on your device, in this tab.
+        </p>
+      </header>
+
+      <label class="drop" id="drop">
+        <input id="input" type="file" accept="image/*" multiple hidden />
+        <span class="drop-title">
+          <span class="pointer-fine">Drop, paste or choose images</span>
+          <span class="pointer-coarse">Choose photos</span>
+        </span>
+        <span class="drop-hint pointer-fine">JPEG, PNG or WebP · several at once is fine</span>
+        <span class="drop-hint pointer-coarse">
+          To pick several: in Photos, tap each one, then <strong>Add</strong>. In Files, tap
+          <strong>Select</strong> first.
+        </span>
+      </label>
+
+      <!-- On phones and tablets: the camera. iOS returns one photo per camera
+           session, so each shot is added separately; take as many as you like. -->
+      <label class="camera pointer-coarse">
+        <input id="camera" type="file" accept="image/*" capture="environment" hidden />
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z" /><circle cx="12" cy="13" r="3.5" /></svg>
+        Take a photo
+      </label>
+
+      <div class="controls">
+        <span class="label">Background</span>
+        <div class="swatches" role="radiogroup" aria-label="Background">
+          <button class="swatch checker" data-bg="" aria-checked="true" role="radio" title="Transparent"></button>
+          <button class="swatch" data-bg="#ffffff" aria-checked="false" role="radio" title="White" style="--sw: #ffffff"></button>
+          <button class="swatch" data-bg="#000000" aria-checked="false" role="radio" title="Black" style="--sw: #000000"></button>
+          <label class="swatch custom" title="Custom colour">
+            <input id="color" type="color" value="#f5a623" />
+          </label>
+        </div>
+      </div>
+
+      <div class="status" id="status" hidden>
+        <span id="status-text"></span>
+        <progress id="progress" max="1" value="0"></progress>
+      </div>
+
+      <section class="gallery" id="gallery" aria-label="Example photos" hidden>
+        <span class="label">Try an example</span>
+        <div class="thumbs" id="thumbs"></div>
+      </section>
+
+      <section class="example" id="example" aria-label="Example">
+        <div class="example-meta">
+          <span><strong>Example result.</strong> Drag across the image to compare.</span>
+          <button type="button" class="try" id="try-example">Try it on this image</button>
+        </div>
+        <div class="compare" style="--pos: 50%">
+          <img
+            class="before"
+            src="examples/astronaut.jpg"
+            width="960"
+            height="768"
+            alt="Example photo: an astronaut in a white spacesuit and jetpack floating in space above the Earth"
+          />
+          <div class="after-wrap">
+            <img
+              class="after ready"
+              src="examples/astronaut-cutout.webp"
+              width="960"
+              height="768"
+              alt="The same astronaut with space and the Earth removed"
+            />
+          </div>
+          <input class="slider" type="range" min="0" max="100" value="50" aria-label="Compare example photo and result" />
+        </div>
+        <p class="credit">
+          Photo: Bruce McCandless II on the first untethered spacewalk, 1984.
+          <a href="https://images.nasa.gov/details/s84-27017">NASA</a>.
+        </p>
+      </section>
+
+      <ul class="results" id="results"></ul>
+
+      <details class="about">
+        <summary>How it works</summary>
+        <p>
+          This page uses
+          <a href="https://huggingface.co/docs/transformers.js">transformers.js</a>
+          to run <a href="https://huggingface.co/briaai/RMBG-1.4">BRIA RMBG-1.4</a>,
+          a segmentation model, with WebGPU when your browser has it and
+          WebAssembly otherwise. The first time, the model weights (about
+          44–88 MB) are downloaded and cached by your browser. After that it
+          works offline.
+        </p>
+        <p>
+          Your images are read straight from disk into the model and never sent
+          over the network. You can confirm this in your browser's network tab.
+          RMBG-1.4 is
+          <a href="https://huggingface.co/briaai/RMBG-1.4#license">licensed</a>
+          for non-commercial use.
+        </p>
+      </details>
+    </main>
+
+    <template id="item">
+      <li class="item">
+        <div class="toolbar" role="toolbar" aria-label="Edit tools" hidden>
+          <div class="modes" role="radiogroup" aria-label="Tool">
+            <button type="button" role="radio" data-mode="off" aria-checked="true" title="Compare: drag across the image to see the original">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M5 6h4v12H5zM15 6h4v12h-4z" /></svg>
+              <span>Compare</span>
+            </button>
+            <button type="button" role="radio" data-mode="erase" aria-checked="false" title="Erase: paint to remove areas (E)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 4l4 4-9 9H7l-3-3zM11 17h9" /></svg>
+              <span>Erase</span>
+            </button>
+            <button type="button" role="radio" data-mode="restore" aria-checked="false" title="Restore: paint to bring back areas (R)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20c4 0 6-2 6-5l9-9-3-3-9 9c-3 0-3 4-3 8z" /></svg>
+              <span>Restore</span>
+            </button>
+            <button type="button" role="radio" data-mode="crop" aria-checked="false" title="Crop, rotate and flip (K)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2v14a2 2 0 002 2h14M2 6h14a2 2 0 012 2v14" /></svg>
+              <span>Crop</span>
+            </button>
+          </div>
+          <label class="size" title="Brush size ([ and ])">
+            <span>Size</span>
+            <input type="range" name="brushSize" min="0.5" max="20" step="0.5" value="4" aria-label="Brush size" />
+          </label>
+          <div class="history">
+            <button type="button" class="undo" disabled title="Undo (⌘Z / Ctrl+Z)" aria-label="Undo">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14L4 9l5-5M4 9h10a6 6 0 010 12h-3" /></svg>
+            </button>
+            <button type="button" class="redo" disabled title="Redo (⇧⌘Z / Ctrl+Y)" aria-label="Redo">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 14l5-5-5-5M20 9H10a6 6 0 000 12h3" /></svg>
+            </button>
+          </div>
+          <div class="crop-bar" hidden>
+            <div class="aspects" role="radiogroup" aria-label="Aspect ratio">
+              <button type="button" role="radio" data-aspect="free" aria-checked="true">Free</button>
+              <button type="button" role="radio" data-aspect="original" aria-checked="false">Original</button>
+              <button type="button" role="radio" data-aspect="1:1" aria-checked="false">1:1</button>
+              <button type="button" role="radio" data-aspect="4:3" aria-checked="false">4:3</button>
+              <button type="button" role="radio" data-aspect="16:9" aria-checked="false">16:9</button>
+            </div>
+            <div class="crop-tools">
+              <button type="button" class="icon rotate-left" title="Rotate left" aria-label="Rotate left">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 109-9 9.75 9.75 0 00-6.74 2.74L3 8M3 3v5h5" /></svg>
+              </button>
+              <button type="button" class="icon rotate-right" title="Rotate right" aria-label="Rotate right">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 11-9-9c2.52 0 4.93 1 6.74 2.74L21 8M21 3v5h-5" /></svg>
+              </button>
+              <button type="button" class="icon flip" title="Flip horizontally" aria-label="Flip horizontally">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v18M16 7l4 5-4 5zM8 7l-4 5 4 5z" /></svg>
+              </button>
+              <button type="button" class="fit" title="Crop to the cut-out, with a little padding">Fit to subject</button>
+              <span class="crop-size" aria-live="polite"></span>
+            </div>
+            <div class="crop-actions">
+              <button type="button" class="cancel" title="Cancel (Esc)">Cancel</button>
+              <button type="button" class="done" title="Apply (Enter)">Done</button>
+            </div>
+          </div>
+        </div>
+        <div class="compare" style="--pos: 50%">
+          <img class="before" alt="Original" />
+          <div class="after-wrap"><canvas class="after" role="img" aria-label="Background removed"></canvas></div>
+          <input class="slider" type="range" min="0" max="100" value="50" aria-label="Compare original and result" />
+          <div class="pending"><span class="spinner"></span></div>
+          <div class="brush-cursor" hidden></div>
+          <div class="crop-box" hidden>
+            <span class="handle corner" data-handle="nw"></span>
+            <span class="handle edge" data-handle="n"></span>
+            <span class="handle corner" data-handle="ne"></span>
+            <span class="handle edge" data-handle="e"></span>
+            <span class="handle corner" data-handle="se"></span>
+            <span class="handle edge" data-handle="s"></span>
+            <span class="handle corner" data-handle="sw"></span>
+            <span class="handle edge" data-handle="w"></span>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="name"></span>
+          <span class="info"></span>
+          <button class="download" disabled>Download</button>
+        </div>
+        <p class="credit" hidden></p>
+        <details class="tune" hidden>
+          <summary>Fine-tune</summary>
+          <label class="field">
+            <span>Background cutoff <output data-for="cutoff"></output></span>
+            <input type="range" name="cutoff" min="0" max="90" step="1" />
+            <small>Areas the model is less sure about than this become transparent. Raise it to remove more, lower it to keep more.</small>
+          </label>
+          <label class="field">
+            <span>Edge softness <output data-for="softness"></output></span>
+            <input type="range" name="softness" min="0" max="100" step="1" />
+            <small>How gradually edges fade out. Lower for crisp edges, higher for soft ones.</small>
+          </label>
+          <label class="check">
+            <input type="checkbox" name="trim" />
+            <span>Trim narrow areas at the image border</span>
+          </label>
+          <label class="field">
+            <span>Trim width <output data-for="trimWidth"></output></span>
+            <input type="range" name="trimWidth" min="1" max="40" step="1" />
+            <small>Areas narrower than this that reach the border of the image are removed.</small>
+          </label>
+          <label class="check">
+            <input type="checkbox" name="fill" />
+            <span>Fill holes inside the subject</span>
+          </label>
+          <label class="field">
+            <span>Largest hole <output data-for="fillSize"></output></span>
+            <input type="range" name="fillSize" min="0.5" max="20" step="0.5" />
+            <small>Fills gaps the model was unsure about that are surrounded by the subject, like a dark or shiny patch. Gaps it's confident about are kept.</small>
+          </label>
+          <div class="actions">
+            <button type="button" class="reset">Reset all</button>
+          </div>
+        </details>
+      </li>
+    </template>
+  </body>
+</html>

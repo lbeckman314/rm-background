@@ -1,0 +1,46 @@
+{
+  "generated": "2026-11-18T00:19:57.303Z",
+  "device": "webgpu",
+  "masks": {
+    "astronaut": {
+      "width": 1024,
+      "height": 1024,
+      "bytes": 44168
+    },
+    "mug": {
+      "width": 1024,
+      "height": 1024,
+      "bytes": 8763
+    },
+    "fox": {
+      "width": 1024,
+      "height": 1024,
+      "bytes": 63696
+    },
+    "nyberg": {
+      "width": 1024,
+      "height": 1024,
+      "bytes": 88638
+    },
+    "portrait": {
+      "width": 1024,
+      "height": 1024,
+      "bytes": 87181
+    },
+    "canadarm": {
+      "width": 1024,
+      "height": 1024,
+      "bytes": 20867
+    },
+    "curiosity": {
+      "width": 1024,
+      "height": 1024,
+      "bytes": 69500
+    },
+    "aldrin": {
+      "width": 1024,
+      "height": 1024,
+      "bytes": 188125
+    }
+  }
+}

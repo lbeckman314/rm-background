@@ -1,0 +1,10 @@
+{
+  "name": "rm-background",
+  "private": true,
+  "type": "module",
+  "description": "Remove the background from photos, privately, in your browser.",
+  "scripts": {
+    "test": "node --test",
+    "dev": "python3 scripts/dev-server.py"
+  }
+}

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Regenerate fixtures</title>
+    <style>
+      body { font: 15px/1.5 system-ui, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; }
+      li.done { color: green; }
+      li.error { color: crimson; }
+      code { background: rgba(127, 127, 127, 0.15); padding: 1px 4px; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>Regenerate fixtures</h1>
+    <p>
+      Runs the model on every example in <code>examples/examples.json</code> and saves its raw
+      mask to <code>tests/fixtures/</code>, for <code>node --test</code> and
+      <code>tests/report.html</code>. Do this after changing the model or its settings in
+      <code>worker.js</code>, not after changing <code>mask.js</code>.
+    </p>
+    <p>
+      Needs the dev server, which is what allows saving:
+      <code>python3 scripts/dev-server.py</code>.
+    </p>
+    <button id="run">Regenerate</button>
+    <ul id="log"></ul>
+
+    <script type="module">
+      import { encodeFixture } from "./shared.js";
+
+      const log = document.getElementById("log");
+      const line = (text, cls = "") => {
+        const li = document.createElement("li");
+        li.textContent = text;
+        li.className = cls;
+        log.append(li);
+        return li;
+      };
+
+      async function gzip(bytes) {
+        const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+      }
+
+      async function put(path, body) {
+        const response = await fetch(path, { method: "PUT", body });
+        if (!response.ok) throw new Error(`${path}: ${response.status} ${response.statusText} (is scripts/dev-server.py running?)`);
+      }
+
+      document.getElementById("run").addEventListener("click", async (event) => {
+        event.target.disabled = true;
+        log.textContent = "";
+        const { examples } = await fetch("../examples/examples.json").then((r) => r.json());
+        const worker = new Worker("../worker.js", { type: "module" });
+        let device = "";
+        const pending = new Map();
+        worker.addEventListener("message", ({ data }) => {
+          if (data.type === "ready") device = data.device;
+          if (data.type === "status") status.textContent = data.message;
+          if (data.type === "result" || data.type === "error") pending.get(data.id)?.(data);
+        });
+        const status = line("Starting…");
+        const run = (id, file) =>
+          new Promise((resolve) => {
+            pending.set(id, resolve);
+            worker.postMessage({ id, file });
+          });
+
+        const manifest = { generated: new Date().toISOString(), device: "", masks: {} };
+        for (const [index, example] of examples.entries()) {
+          const item = line(`${example.id}: running…`);
+          try {
+            const blob = await fetch(`../examples/${example.id}.jpg`).then((r) => r.blob());
+            const result = await run(index, new File([blob], `${example.id}.jpg`, { type: blob.type }));
+            if (result.type === "error") throw new Error(result.message);
+            const bytes = await gzip(encodeFixture(result.mask, result.maskWidth, result.maskHeight));
+            await put(`./fixtures/${example.id}.mask.gz`, bytes);
+            manifest.masks[example.id] = { width: result.maskWidth, height: result.maskHeight, bytes: bytes.length };
+            item.textContent = `${example.id}: saved (${(bytes.length / 1024).toFixed(0)} KB, ${(result.ms / 1000).toFixed(1)} s)`;
+            item.className = "done";
+          } catch (error) {
+            item.textContent = `${example.id}: ${error.message}`;
+            item.className = "error";
+          }
+        }
+        manifest.device = device;
+        try {
+          await put("./fixtures/manifest.json", JSON.stringify(manifest, null, 2) + "\n");
+          status.textContent = `Done, using ${device}. Run node --test, or open report.html.`;
+        } catch (error) {
+          status.textContent = error.message;
+          status.className = "error";
+        }
+        worker.terminate();
+        event.target.disabled = false;
+      });
+    </script>
+  </body>
+</html>

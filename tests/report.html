@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mask report</title>
+    <style>
+      :root { color-scheme: light dark; font: 14px/1.5 system-ui, sans-serif; }
+      body { max-width: 1100px; margin: 32px auto; padding: 0 16px; }
+      code { background: rgba(127, 127, 127, 0.15); padding: 1px 4px; border-radius: 4px; }
+      .summary { font-size: 16px; font-weight: 600; }
+      .example { border: 1px solid rgba(127, 127, 127, 0.35); border-radius: 10px; padding: 12px; margin: 16px 0; }
+      .example h2 { margin: 0 0 2px; font-size: 16px; }
+      .example p { margin: 0 0 8px; color: GrayText; }
+      .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .pane { position: relative; }
+      .pane canvas, .pane img { display: block; width: 100%; height: auto; border-radius: 6px; }
+      .cutout { background: repeating-conic-gradient(#ccc 0 25%, #fff 0 50%) 0 0 / 16px 16px; border-radius: 6px; }
+      .dot { position: absolute; width: 12px; height: 12px; margin: -6px 0 0 -6px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px #000; }
+      .dot.keep.pass { background: #16a34a; }
+      .dot.remove.pass { background: #16a34a; border-style: dashed; }
+      .dot.fail { background: #dc2626; }
+      .dot.known { background: #f59e0b; }
+      table { border-collapse: collapse; margin-top: 8px; width: 100%; font-size: 13px; }
+      td, th { text-align: left; padding: 2px 8px 2px 0; }
+      .fail-text { color: #dc2626; font-weight: 600; }
+      .known-text { color: #b45309; }
+      .picked { font-family: ui-monospace, monospace; }
+      @media (max-width: 640px) { .pair { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <h1>Mask report</h1>
+    <p>
+      Each example's saved model mask (<code>tests/fixtures/</code>), cleaned up by the current
+      <code>mask.js</code> with its default settings. Dots are checkpoints from
+      <code>examples/examples.json</code>: solid = must keep, dashed = must remove; green passes,
+      red fails, amber is a known issue. Click an image to get coordinates for a new checkpoint.
+    </p>
+    <p class="summary" id="summary">Loading…</p>
+    <p class="picked" id="picked"></p>
+    <div id="examples"></div>
+
+    <script type="module">
+      import { DEFAULTS, refineMask } from "../mask.js";
+      import { checkCheckpoints, decodeFixture } from "./shared.js";
+
+      async function gunzip(response) {
+        const stream = response.body.pipeThrough(new DecompressionStream("gzip"));
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+      }
+
+      function cutout(image, alpha, width, height) {
+        const mask = new OffscreenCanvas(width, height);
+        const rgba = new Uint8ClampedArray(width * height * 4);
+        for (let i = 0; i < alpha.length; i++) rgba[i * 4 + 3] = alpha[i];
+        mask.getContext("2d").putImageData(new ImageData(rgba, width, height), 0, 0);
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        canvas.className = "cutout";
+        const ctx = canvas.getContext("2d");
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(mask, 0, 0, canvas.width, canvas.height);
+        ctx.globalCompositeOperation = "source-in";
+        ctx.drawImage(image, 0, 0);
+        return canvas;
+      }
+
+      function dots(pane, results) {
+        for (const r of results) {
+          const dot = document.createElement("span");
+          dot.className = `dot ${r.kind} ${r.pass ? "pass" : r.known ? "known" : "fail"}`;
+          dot.style.left = `${r.at[0] * 100}%`;
+          dot.style.top = `${r.at[1] * 100}%`;
+          dot.title = `${r.kind}: ${r.note} (${r.value})`;
+          pane.append(dot);
+        }
+      }
+
+      const picked = document.getElementById("picked");
+      function pickable(element, id) {
+        element.addEventListener("click", (event) => {
+          const rect = element.getBoundingClientRect();
+          const x = ((event.clientX - rect.left) / rect.width).toFixed(3);
+          const y = ((event.clientY - rect.top) / rect.height).toFixed(3);
+          picked.textContent = `${id}: { "at": [${x}, ${y}], "note": "" }`;
+          navigator.clipboard?.writeText(picked.textContent.replace(/^[^:]+: /, "")).catch(() => {});
+        });
+      }
+
+      const { examples } = await fetch("../examples/examples.json").then((r) => r.json());
+      const container = document.getElementById("examples");
+      const totals = { pass: 0, fail: 0, known: 0 };
+      window.reportResults = {};
+
+      for (const example of examples) {
+        const section = document.createElement("section");
+        section.className = "example";
+        section.innerHTML = `<h2></h2><p></p><div class="pair"><div class="pane original"></div><div class="pane result"></div></div><table></table>`;
+        section.querySelector("h2").textContent = `${example.title} (${example.id})`;
+        section.querySelector("p").textContent = example.tests;
+        container.append(section);
+
+        const image = new Image();
+        image.src = `../examples/${example.id}.jpg`;
+        await image.decode();
+        section.querySelector(".original").append(image);
+        pickable(image, example.id);
+
+        const response = await fetch(`./fixtures/${example.id}.mask.gz`);
+        if (!response.ok) {
+          section.querySelector(".result").textContent = "No fixture: run tests/fixtures.html.";
+          continue;
+        }
+        const { width, height, mask } = decodeFixture(await gunzip(response));
+        const alpha = refineMask(mask, width, height, DEFAULTS);
+        const canvas = cutout(image, alpha, width, height);
+        section.querySelector(".result").append(canvas);
+        pickable(canvas, example.id);
+
+        const results = checkCheckpoints(alpha, width, height, example.checkpoints);
+        window.reportResults[example.id] = results;
+        dots(section.querySelector(".original"), results);
+        dots(section.querySelector(".result"), results);
+        const table = section.querySelector("table");
+        for (const r of results) {
+          const row = table.insertRow();
+          const status = r.pass ? "pass" : r.known ? "known issue" : "FAIL";
+          row.innerHTML = `<td></td><td></td><td></td><td></td>`;
+          row.cells[0].textContent = status;
+          row.cells[0].className = r.pass ? "" : r.known ? "known-text" : "fail-text";
+          row.cells[1].textContent = r.kind;
+          row.cells[2].textContent = r.known && !r.pass ? `${r.note}: ${r.known}` : r.note;
+          row.cells[3].textContent = `${Math.round((r.value / 255) * 100)}% opaque`;
+          totals[r.pass ? "pass" : r.known ? "known" : "fail"]++;
+        }
+      }
+
+      document.getElementById("summary").textContent =
+        `${totals.pass} passing, ${totals.fail} failing, ${totals.known} known issues`;
+      window.reportDone = true;
+    </script>
+  </body>
+</html>

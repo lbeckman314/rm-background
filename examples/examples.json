@@ -1,0 +1,178 @@
+{
+  "about": "Example photos: shown on the page (demo: true) and used as test cases for mask.js (see tests/). Checkpoints are [x, y] in 0-1 image coordinates: with the default settings, 'keep' points must end up opaque and 'remove' points transparent. A checkpoint with 'known' (the reason) is a current failure that's tracked rather than treated as a test failure.",
+  "examples": [
+    {
+      "id": "astronaut",
+      "title": "Astronaut",
+      "tests": "Fill holes: the dark visor and camera lens are part of the subject.",
+      "demo": true,
+      "credit": "Bruce McCandless II on the first untethered spacewalk, 1984. NASA.",
+      "license": "Public domain (NASA)",
+      "source": "https://images.nasa.gov/details/s84-27017",
+      "checkpoints": {
+        "keep": [
+          { "at": [0.709, 0.305], "note": "helmet visor" },
+          { "at": [0.571, 0.098], "note": "camera lens" },
+          { "at": [0.583, 0.43], "note": "chest" },
+          { "at": [0.25, 0.768], "note": "boot" }
+        ],
+        "remove": [
+          { "at": [0.083, 0.104], "note": "space" },
+          { "at": [0.104, 0.964], "note": "Earth" },
+          { "at": [0.771, 0.234], "note": "space beside the helmet" }
+        ]
+      }
+    },
+    {
+      "id": "mug",
+      "title": "Mug",
+      "tests": "Fill holes must not close a real gap: the space inside the handle is background.",
+      "demo": true,
+      "credit": "Coffee mug. Ryan Holloway, via Unsplash.",
+      "license": "CC0",
+      "source": "https://commons.wikimedia.org/wiki/File:Coffee_Mug_(Unsplash).jpg",
+      "checkpoints": {
+        "keep": [
+          { "at": [0.667, 0.611], "note": "mug body" },
+          { "at": [0.646, 0.537], "note": "printed skull" }
+        ],
+        "remove": [
+          { "at": [0.802, 0.537], "note": "inside the handle" },
+          { "at": [0.104, 0.185], "note": "wall" },
+          { "at": [0.312, 0.87], "note": "table" }
+        ]
+      }
+    },
+    {
+      "id": "fox",
+      "title": "Fox",
+      "tests": "Fur edges, and a subject cut off by the frame.",
+      "demo": true,
+      "credit": "Red fox. U.S. Fish & Wildlife Service, Alaska Region.",
+      "license": "Public domain (U.S. government work)",
+      "source": "https://commons.wikimedia.org/wiki/File:Red_fox_(8385096018).jpg",
+      "checkpoints": {
+        "keep": [
+          { "at": [0.474, 0.461], "note": "eye" },
+          { "at": [0.729, 0.469], "note": "back" },
+          { "at": [0.5, 0.172], "note": "ear" },
+          { "at": [0.49, 0.969], "note": "front leg at the frame edge" }
+        ],
+        "remove": [
+          { "at": [0.062, 0.781], "note": "gravel" },
+          { "at": [0.062, 0.188], "note": "grass" },
+          { "at": [0.583, 0.938], "note": "gravel between the legs" }
+        ]
+      }
+    },
+    {
+      "id": "nyberg",
+      "title": "Floating hair",
+      "tests": "Fine hair against a busy background.",
+      "demo": true,
+      "credit": "Karen Nyberg on the International Space Station, 2013. NASA.",
+      "license": "Public domain (NASA)",
+      "source": "https://images.nasa.gov/details/iss036e018174",
+      "checkpoints": {
+        "keep": [
+          { "at": [0.474, 0.706], "note": "face" },
+          { "at": [0.469, 0.942], "note": "shirt" },
+          { "at": [0.469, 0.471], "note": "hair" }
+        ],
+        "remove": [
+          { "at": [0.188, 0.471], "note": "bag on the wall" },
+          { "at": [0.885, 0.659], "note": "hatch" },
+          { "at": [0.833, 0.188], "note": "panel" }
+        ]
+      }
+    },
+    {
+      "id": "portrait",
+      "title": "Portrait",
+      "tests": "A studio portrait with a patterned backdrop and a glossy helmet beside the subject.",
+      "demo": true,
+      "credit": "Official portrait of astronaut Jack Hathaway, 2025. Josh Valcarcel, NASA.",
+      "license": "Public domain (NASA)",
+      "source": "https://images.nasa.gov/details/jsc2025e068207_alt",
+      "checkpoints": {
+        "keep": [
+          { "at": [0.545, 0.24], "note": "face" },
+          { "at": [0.537, 0.453], "note": "chest" },
+          { "at": [0.698, 0.865], "note": "glove on knee" },
+          { "at": [0.691, 0.115], "note": "backpack top" }
+        ],
+        "remove": [
+          { "at": [0.078, 0.156], "note": "flag", "known": "The model treats the top of the flag as part of the subject." },
+          { "at": [0.965, 0.271], "note": "backdrop, right" },
+          { "at": [0.391, 0.042], "note": "backdrop, top" }
+        ]
+      }
+    },
+    {
+      "id": "canadarm",
+      "title": "Robotic arm",
+      "tests": "Trim must not remove a real, fairly thin subject that runs off the edge of the photo.",
+      "demo": true,
+      "credit": "The Canadarm2 robotic arm above the Mozambique Channel, 2024. NASA.",
+      "license": "Public domain (NASA)",
+      "source": "https://images.nasa.gov/details/iss071e361950",
+      "checkpoints": {
+        "keep": [
+          { "at": [0.245, 0.234], "note": "arm with lettering" },
+          { "at": [0.542, 0.094], "note": "upper boom" },
+          { "at": [0.344, 0.422], "note": "joint" },
+          { "at": [0.042, 0.234], "note": "end of the arm at the frame edge" }
+        ],
+        "remove": [
+          { "at": [0.5, 0.703], "note": "ocean" },
+          { "at": [0.677, 0.391], "note": "land" },
+          { "at": [0.885, 0.047], "note": "space" }
+        ]
+      }
+    },
+    {
+      "id": "curiosity",
+      "title": "Mars rover",
+      "tests": "Low contrast: the rover is a similar colour to the ground it stands on.",
+      "demo": true,
+      "credit": "Curiosity's selfie at \"Aberlady\" and \"Kilmarie\", Mars, 2019. NASA/JPL-Caltech/MSSS.",
+      "license": "Public domain (NASA/JPL)",
+      "source": "https://images.nasa.gov/details/PIA23240",
+      "checkpoints": {
+        "keep": [
+          { "at": [0.514, 0.24], "note": "camera mast" },
+          { "at": [0.698, 0.323], "note": "deck" },
+          { "at": [0.774, 0.521], "note": "wheel" },
+          { "at": [0.571, 0.677], "note": "front wheel" }
+        ],
+        "remove": [
+          { "at": [0.19, 0.104], "note": "sky" },
+          { "at": [0.508, 0.917], "note": "ground, front" },
+          { "at": [0.127, 0.469], "note": "ground, left" },
+          { "at": [0.381, 0.573], "note": "ground by the drill holes" }
+        ]
+      }
+    },
+    {
+      "id": "aldrin",
+      "title": "Space selfie (challenge)",
+      "tests": "Clutter: a dark helmet against dark space, with equipment in the foreground.",
+      "demo": true,
+      "credit": "Buzz Aldrin's space selfie, Gemini 12, 1966. NASA.",
+      "license": "Public domain (NASA)",
+      "source": "https://images.nasa.gov/details/S66-62926",
+      "checkpoints": {
+        "keep": [
+          { "at": [0.729, 0.335], "note": "face" },
+          { "at": [0.542, 0.472], "note": "helmet" },
+          { "at": [0.729, 0.629], "note": "neck ring" }
+        ],
+        "remove": [
+          { "at": [0.156, 0.105], "note": "space" },
+          { "at": [0.104, 0.734], "note": "Earth" },
+          { "at": [0.281, 0.891], "note": "camera in the foreground", "known": "The model half-keeps the camera; it's unclear what the subject is." }
+        ]
+      }
+    }
+  ]
+}
