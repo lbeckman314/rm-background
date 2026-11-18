@@ -93,15 +93,65 @@ function finish(id, result, error) {
     job.resolve();
     return;
   }
-  // Decoding the original can take a moment; let the next image start.
   job.resolve();
-  createImageBitmap(file).then((bitmap) => {
-    info.textContent = `${bitmap.width}×${bitmap.height} · ${(result.ms / 1000).toFixed(1)} s on ${device}`;
-    const editor = createEditor(item, { ...result, bitmap });
-    const button = item.querySelector(".download");
-    button.disabled = false;
-    button.addEventListener("click", () => download(editor.exportCanvas(), file.name));
+  const { preview, width, height } = job;
+  info.textContent = `${width}×${height} · ${(result.ms / 1000).toFixed(1)} s on ${device}`;
+  const editor = createEditor(item, {
+    ...result,
+    preview,
+    width,
+    height,
+    loadOriginal: () => createImageBitmap(file),
   });
+  const button = item.querySelector(".download");
+  button.disabled = false;
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    button.textContent = "Preparing…";
+    try {
+      const canvas = await editor.exportCanvas(background);
+      await download(canvas, file.name);
+      canvas.width = canvas.height = 0; // free it now rather than whenever
+    } catch (error) {
+      setStatus(`Couldn't create the download: ${error.message}`);
+    } finally {
+      button.textContent = "Download";
+      button.disabled = false;
+    }
+  });
+}
+
+// Memory: phones reload the page if it uses too much, and a 12 MP photo is
+// ~50 MB once decoded. So decode each photo once, keep only a preview for
+// the screen and a smaller copy for the model, and let the original go; the
+// editor re-reads the file when downloading.
+const PREVIEW_SIZE = 1600; // longest side, px
+const MODEL_SIZE = 1024; // shortest side the model needs, px (it works at 1024 × 1024)
+
+function scaled(source, scale) {
+  if (scale >= 1) return createImageBitmap(source);
+  const width = Math.max(1, Math.round(source.width * scale));
+  const height = Math.max(1, Math.round(source.height * scale));
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(source, 0, 0, width, height);
+  return canvas.transferToImageBitmap();
+}
+
+async function prepare(file) {
+  const original = await createImageBitmap(file);
+  const { width, height } = original;
+  try {
+    return {
+      width,
+      height,
+      preview: await scaled(original, PREVIEW_SIZE / Math.max(width, height)),
+      modelInput: await scaled(original, MODEL_SIZE / Math.min(width, height)),
+    };
+  } finally {
+    original.close();
+  }
 }
 
 // Fail every queued image with the same message, and reset the worker so
@@ -120,7 +170,6 @@ function enqueue(file, example = null) {
   item.querySelector(".name").textContent = file.name;
   if (example) showCredit(item.querySelector(".credit"), example);
   item.querySelector(".info").textContent = "Waiting…";
-  item.querySelector(".before").src = URL.createObjectURL(file);
   bindCompare(item);
   applyBackground(item);
   results.prepend(item);
@@ -130,9 +179,21 @@ function enqueue(file, example = null) {
     () =>
       new Promise((resolve) => {
         const id = nextId++;
-        jobs.set(id, { file, item, resolve });
+        const job = { file, item, resolve };
+        jobs.set(id, job);
         item.querySelector(".info").textContent = "Removing background…";
-        getWorker().postMessage({ id, file });
+        prepare(file).then(
+          ({ width, height, preview, modelInput }) => {
+            Object.assign(job, { width, height, preview });
+            // Show the photo while the model runs.
+            const before = item.querySelector(".before");
+            before.width = preview.width;
+            before.height = preview.height;
+            before.getContext("2d").drawImage(preview, 0, 0);
+            getWorker().postMessage({ id, image: modelInput }, [modelInput]);
+          },
+          () => finish(id, null, "Couldn't read this image"),
+        );
       }),
   );
 }
@@ -169,18 +230,7 @@ function addFiles(files, example = null) {
   }
 }
 
-async function download(source, name) {
-  let canvas = source;
-  if (background) {
-    // Flatten onto the chosen colour.
-    canvas = document.createElement("canvas");
-    canvas.width = source.width;
-    canvas.height = source.height;
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = background;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(source, 0, 0);
-  }
+async function download(canvas, name) {
   const out = await new Promise((r) => canvas.toBlob(r, "image/png"));
   const a = document.createElement("a");
   a.href = URL.createObjectURL(out);

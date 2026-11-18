@@ -1,7 +1,13 @@
 // One result's editor: draws the cut-out, and handles its toolbar (compare,
 // erase/restore brush, crop/rotate/flip, undo/redo) and Fine-tune panel.
 //
-// The cut-out is built in layers on a full-resolution work canvas:
+// Memory: phones (iOS Safari especially) reload the page if it uses too much,
+// so everything on screen is drawn from a preview of the photo (up to
+// ~1600 px). Settings, strokes and framing are all kept in full-resolution
+// photo pixels, so the download re-reads the original file and renders it
+// at full resolution, then frees it.
+//
+// The cut-out is built in layers on a preview-sized work canvas:
 //   1. the model's raw mask, cleaned up with the current settings (mask.js)
 //      and scaled up from the model's resolution,
 //   2. plus everything painted with Restore,
@@ -27,10 +33,12 @@ let current = null;
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-export function createEditor(item, { mask, maskWidth, maskHeight, bitmap }) {
-  const width = bitmap.width;
-  const height = bitmap.height;
+// `preview` is the photo scaled down for the screen; `width` and `height` are
+// the original's; `loadOriginal()` decodes the original for downloads.
+export function createEditor(item, { mask, maskWidth, maskHeight, preview, width, height, loadOriginal }) {
+  const scale = preview.width / width; // preview pixels per photo pixel
   const canvas = item.querySelector(".after");
+  const before = item.querySelector(".before");
   const compare = item.querySelector(".compare");
   const toolbar = item.querySelector(".toolbar");
   const panel = item.querySelector(".tune");
@@ -42,16 +50,6 @@ export function createEditor(item, { mask, maskWidth, maskHeight, bitmap }) {
   const sizeInput = toolbar.querySelector('input[name="brushSize"]');
   const undoButton = toolbar.querySelector(".undo");
   const redoButton = toolbar.querySelector(".redo");
-
-  // The original is shown through the same framing as the result, so swap
-  // the page's <img> preview for a canvas.
-  const beforeImage = item.querySelector(".before");
-  const before = document.createElement("canvas");
-  before.className = "before";
-  before.setAttribute("role", "img");
-  before.setAttribute("aria-label", "Original");
-  beforeImage.replaceWith(before);
-  if (beforeImage.src.startsWith("blob:")) URL.revokeObjectURL(beforeImage.src);
 
   const FULL = { x: 0, y: 0, w: width, h: height };
   const DEFAULT_FRAME = { rotation: 0, flip: false, crop: FULL };
@@ -66,9 +64,11 @@ export function createEditor(item, { mask, maskWidth, maskHeight, bitmap }) {
   let position = 0; // index in history of the current state
 
   const small = new OffscreenCanvas(maskWidth, maskHeight); // cleaned mask
-  const erased = new OffscreenCanvas(width, height);
-  const restored = new OffscreenCanvas(width, height);
-  const work = new OffscreenCanvas(width, height); // the unframed cut-out
+  const layers = {
+    erased: new OffscreenCanvas(preview.width, preview.height),
+    restored: new OffscreenCanvas(preview.width, preview.height),
+  };
+  const work = new OffscreenCanvas(preview.width, preview.height); // the unframed cut-out
 
   // ---- Framing ----
 
@@ -109,13 +109,13 @@ export function createEditor(item, { mask, maskWidth, maskHeight, bitmap }) {
     const ctx = work.getContext("2d");
     ctx.imageSmoothingQuality = "high";
     ctx.globalCompositeOperation = "copy";
-    ctx.drawImage(small, 0, 0, width, height);
+    ctx.drawImage(small, 0, 0, preview.width, preview.height);
     ctx.globalCompositeOperation = "source-over";
-    ctx.drawImage(restored, 0, 0);
+    ctx.drawImage(layers.restored, 0, 0);
     ctx.globalCompositeOperation = "destination-out";
-    ctx.drawImage(erased, 0, 0);
+    ctx.drawImage(layers.erased, 0, 0);
     ctx.globalCompositeOperation = "source-in";
-    ctx.drawImage(bitmap, 0, 0);
+    ctx.drawImage(preview, 0, 0);
     ctx.globalCompositeOperation = "source-over";
   }
 
@@ -125,17 +125,20 @@ export function createEditor(item, { mask, maskWidth, maskHeight, bitmap }) {
   function present() {
     const f = viewFrame();
     const [outWidth, outHeight] = outputSize(f);
-    const m = matrix(f);
+    const viewWidth = Math.max(1, Math.round(outWidth * scale));
+    const viewHeight = Math.max(1, Math.round(outHeight * scale));
+    // Preview pixels → photo pixels → framed photo pixels → screen pixels.
+    const m = new DOMMatrix().scale(scale).multiply(matrix(f)).scale(1 / scale);
     const targets = [[canvas, work]];
-    if (!same(f, beforeFrame)) targets.push([before, bitmap]);
+    if (!same(f, beforeFrame)) targets.push([before, preview]);
     for (const [target, source] of targets) {
-      if (target.width !== outWidth || target.height !== outHeight) {
-        target.width = outWidth;
-        target.height = outHeight;
+      if (target.width !== viewWidth || target.height !== viewHeight) {
+        target.width = viewWidth;
+        target.height = viewHeight;
       }
       const ctx = target.getContext("2d");
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.clearRect(0, 0, outWidth, outHeight);
+      ctx.clearRect(0, 0, viewWidth, viewHeight);
       ctx.setTransform(m);
       ctx.drawImage(source, 0, 0);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -167,15 +170,17 @@ export function createEditor(item, { mask, maskWidth, maskHeight, bitmap }) {
 
   // ---- Brush ----
 
-  // Paint one segment of a stroke. Each stroke is drawn on its own layer and
-  // cleared from the other, so the latest stroke over a spot wins.
-  function paint(stroke, from, to) {
-    const [on, off] = stroke.mode === "erase" ? [erased, restored] : [restored, erased];
+  // Paint one segment of a stroke (in photo pixels) onto a pair of layers
+  // drawn at `layerScale`. Each stroke is drawn on its own layer and cleared
+  // from the other, so the latest stroke over a spot wins.
+  function paint(stroke, from, to, target = layers, layerScale = scale) {
+    const [on, off] = stroke.mode === "erase" ? [target.erased, target.restored] : [target.restored, target.erased];
     for (const [layer, op] of [
       [on, "source-over"],
       [off, "destination-out"],
     ]) {
       const ctx = layer.getContext("2d");
+      ctx.setTransform(layerScale, 0, 0, layerScale, 0, 0);
       ctx.globalCompositeOperation = op;
       ctx.beginPath();
       if (from[0] === to[0] && from[1] === to[1]) {
@@ -192,25 +197,33 @@ export function createEditor(item, { mask, maskWidth, maskHeight, bitmap }) {
         ctx.strokeStyle = "#000";
         ctx.stroke();
       }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
     }
   }
 
-  function replay() {
-    for (const layer of [erased, restored]) layer.getContext("2d").clearRect(0, 0, width, height);
+  function replay(target = layers, layerScale = scale) {
+    for (const layer of Object.values(target)) {
+      const ctx = layer.getContext("2d");
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, layer.width, layer.height);
+    }
     for (const stroke of strokes) {
       const { points } = stroke;
-      for (let i = 0; i < points.length; i++) paint(stroke, points[Math.max(0, i - 1)], points[i]);
+      for (let i = 0; i < points.length; i++) {
+        paint(stroke, points[Math.max(0, i - 1)], points[i], target, layerScale);
+      }
     }
   }
 
   const brushPixels = () => (brush.size / 100) * Math.max(width, height);
 
-  // Pointer position in the visible canvas's pixels.
+  // Pointer position in framed photo pixels (the view at full resolution).
   function toOutput(event) {
     const rect = canvas.getBoundingClientRect();
+    const [outWidth, outHeight] = outputSize(viewFrame());
     return [
-      ((event.clientX - rect.left) / rect.width) * canvas.width,
-      ((event.clientY - rect.top) / rect.height) * canvas.height,
+      ((event.clientX - rect.left) / rect.width) * outWidth,
+      ((event.clientY - rect.top) / rect.height) * outHeight,
     ];
   }
 
@@ -224,7 +237,7 @@ export function createEditor(item, { mask, maskWidth, maskHeight, bitmap }) {
   function moveCursor(event) {
     const rect = canvas.getBoundingClientRect();
     const box = compare.getBoundingClientRect();
-    const diameter = brushPixels() * (rect.width / canvas.width);
+    const diameter = brushPixels() * (rect.width / outputSize(viewFrame())[0]);
     cursor.style.width = cursor.style.height = `${diameter}px`;
     cursor.style.left = `${event.clientX - box.left}px`;
     cursor.style.top = `${event.clientY - box.top}px`;
@@ -413,14 +426,15 @@ export function createEditor(item, { mask, maskWidth, maskHeight, bitmap }) {
   // padding, matching the aspect ratio if one is set.
   function fitToSubject() {
     composite(); // make sure the work canvas is current
-    const data = work.getContext("2d").getImageData(0, 0, width, height).data;
-    let minX = width;
-    let minY = height;
+    const { width: pw, height: ph } = work;
+    const data = work.getContext("2d").getImageData(0, 0, pw, ph).data;
+    let minX = pw;
+    let minY = ph;
     let maxX = -1;
     let maxY = -1;
-    for (let y = 0; y < height; y++) {
-      const row = y * width * 4;
-      for (let x = 0; x < width; x++) {
+    for (let y = 0; y < ph; y++) {
+      const row = y * pw * 4;
+      for (let x = 0; x < pw; x++) {
         if (data[row + x * 4 + 3] > 16) {
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
@@ -430,6 +444,11 @@ export function createEditor(item, { mask, maskWidth, maskHeight, bitmap }) {
       }
     }
     if (maxX < 0) return; // nothing to fit to
+    // Preview pixels → photo pixels, rounding outwards.
+    minX = Math.floor(minX / scale);
+    minY = Math.floor(minY / scale);
+    maxX = Math.min(width - 1, Math.ceil((maxX + 1) / scale) - 1);
+    maxY = Math.min(height - 1, Math.ceil((maxY + 1) / scale) - 1);
     const pad = Math.round(0.04 * Math.max(maxX - minX, maxY - minY));
     const x = Math.max(0, minX - pad);
     const y = Math.max(0, minY - pad);
@@ -629,12 +648,47 @@ export function createEditor(item, { mask, maskWidth, maskHeight, bitmap }) {
     cropping: () => tool === "crop",
     doneCrop,
     cancelCrop,
-    // The canvas to download: applies a crop in progress and any pending
-    // redraw first, so it matches what's on screen.
-    exportCanvas() {
+    // Render the result at full resolution for downloading, from the
+    // original file: applies a crop in progress first, so it matches what's
+    // on screen, and flattens onto `background` if given. Free the returned
+    // canvas (width = 0) when done; nothing full-size is kept.
+    async exportCanvas(background = "") {
       if (tool === "crop") doneCrop();
       run();
-      return canvas;
+      const original = await loadOriginal();
+      let full = null;
+      try {
+        if (strokes.length) {
+          full = { erased: new OffscreenCanvas(width, height), restored: new OffscreenCanvas(width, height) };
+          replay(full, 1);
+        }
+        const [outWidth, outHeight] = outputSize(frame);
+        const out = document.createElement("canvas");
+        out.width = outWidth;
+        out.height = outHeight;
+        const ctx = out.getContext("2d");
+        ctx.imageSmoothingQuality = "high";
+        ctx.setTransform(matrix(frame));
+        ctx.drawImage(small, 0, 0, width, height);
+        if (full) {
+          ctx.drawImage(full.restored, 0, 0);
+          ctx.globalCompositeOperation = "destination-out";
+          ctx.drawImage(full.erased, 0, 0);
+        }
+        ctx.globalCompositeOperation = "source-in";
+        ctx.drawImage(original, 0, 0);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        if (background) {
+          ctx.globalCompositeOperation = "destination-over";
+          ctx.fillStyle = background;
+          ctx.fillRect(0, 0, outWidth, outHeight);
+        }
+        ctx.globalCompositeOperation = "source-over";
+        return out;
+      } finally {
+        original.close();
+        if (full) for (const layer of Object.values(full)) layer.width = layer.height = 0;
+      }
     },
   };
   current ??= editor;

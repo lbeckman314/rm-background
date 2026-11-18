@@ -110,8 +110,17 @@ async function infer(image) {
   return { mask: mask.data, maskWidth: mask.width, maskHeight: mask.height };
 }
 
-async function removeBackground(file) {
-  const image = await RawImage.fromBlob(file);
+// `input` is an ImageBitmap (from the page, already scaled down) or a File.
+async function readImage(input) {
+  if (input instanceof Blob) return RawImage.fromBlob(input);
+  const canvas = new OffscreenCanvas(input.width, input.height);
+  canvas.getContext("2d").drawImage(input, 0, 0);
+  input.close();
+  return RawImage.fromCanvas(canvas);
+}
+
+async function removeBackground(input) {
+  const image = await readImage(input);
   try {
     return await infer(image);
   } catch (error) {
@@ -125,12 +134,12 @@ async function removeBackground(file) {
 }
 
 self.addEventListener("message", async ({ data }) => {
-  const { id, file } = data;
+  const { id, file, image } = data;
   try {
     loading ??= load();
     await loading;
     const started = performance.now();
-    const result = await removeBackground(file);
+    const result = await removeBackground(image ?? file);
     postMessage(
       { type: "result", id, ...result, ms: Math.round(performance.now() - started) },
       [result.mask.buffer],
