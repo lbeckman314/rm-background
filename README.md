@@ -11,8 +11,10 @@ self-hostable alternative to services like remove.bg.
   softness, trimming narrow areas at the image border and filling holes inside
   the subject, plus an erase and restore brush. They update live, without
   running the model again.
-- **Crop, rotate and flip:** with aspect ratio presets and "Fit to subject",
-  which crops to the cut-out. Every edit can be undone and redone.
+- **Crop, rotate, straighten and flip:** a straighten dial (±45°) that keeps
+  the corners filled, like the iOS photo editor, plus aspect ratio presets and
+  "Fit to subject", which crops to the cut-out. Every edit can be undone and
+  redone.
 - **No build step and no dependencies:** a handful of static files.
 - **Tested:** example photos with checkpoints, runnable in Node with no
   dependencies.

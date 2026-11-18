@@ -521,10 +521,13 @@ a {
 .crop-box.locked .handle.edge {
   display: none;
 }
-.brushing .before {
+.brushing .before,
+.cropping .before {
   opacity: 0.3;
 }
-.brushing .after-wrap {
+/* While cropping, this also shows where the turned photo's edges are. */
+.brushing .after-wrap,
+.cropping .after-wrap {
   background: none !important;
 }
 
@@ -673,6 +676,48 @@ a {
 .crop-bar[hidden] {
   display: none;
 }
+/* Straighten dial: a slider over tick marks every 5°, longer every 15°,
+   with the centre marked. */
+.straighten {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.angle-reset {
+  flex: none;
+  min-width: 56px;
+  height: 28px;
+  padding: 0 8px;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+.angle-reset:hover {
+  border-color: var(--accent);
+}
+.dial {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  padding: 6px 0;
+  background:
+    linear-gradient(var(--accent), var(--accent)) 50% 0 / 2px 100% no-repeat,
+    repeating-linear-gradient(to right, var(--mut) 0 1px, transparent 1px calc(100% / 6)) 0 100% / calc(100% - 1px) 9px no-repeat,
+    repeating-linear-gradient(to right, var(--line) 0 1px, transparent 1px calc(100% / 18)) 0 100% / calc(100% - 1px) 5px no-repeat;
+}
+.dial input {
+  display: block;
+  width: 100%;
+  margin: 0;
+  accent-color: var(--accent);
+  touch-action: pan-y;
+}
+
 .aspects {
   display: flex;
   border: 1px solid var(--line);
@@ -703,7 +748,7 @@ a {
 .crop-actions {
   margin-left: auto;
 }
-.crop-bar button:not([role="radio"]) {
+.crop-bar button:not([role="radio"]):not(.angle-reset) {
   display: inline-grid;
   place-items: center;
   height: 28px;
@@ -719,7 +764,7 @@ a {
   width: 28px;
   padding: 0;
 }
-.crop-bar button:not([role="radio"]):hover {
+.crop-bar button:not([role="radio"]):not(.angle-reset):hover {
   border-color: var(--accent);
 }
 .crop-bar .done {

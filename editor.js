@@ -2,17 +2,19 @@
 // erase/restore brush, crop/rotate/flip, undo/redo) and Fine-tune panel.
 //
 // Memory: phones (iOS Safari especially) reload the page if it uses too much,
-// so everything on screen is drawn from a preview of the photo (up to
-// ~1600 px). Settings, strokes and framing are all kept in full-resolution
-// photo pixels, so the download re-reads the original file and renders it
-// at full resolution, then frees it.
+// so everything on screen is drawn from a preview of the photo (see
+// PREVIEW_SIZE in app.js), brush layers only exist once you brush, and there
+// are no other copies. Settings, strokes and framing are all kept in
+// full-resolution photo pixels, so the download re-reads the original file
+// and renders it at full resolution, then frees it.
 //
-// The cut-out is built in layers on a preview-sized work canvas:
+// The cut-out is drawn in layers, straight onto the visible canvas through
+// the framing (crop, rotation, flip):
 //   1. the model's raw mask, cleaned up with the current settings (mask.js)
 //      and scaled up from the model's resolution,
 //   2. plus everything painted with Restore,
 //   3. minus everything painted with Erase,
-// and then framed (cropped, rotated, flipped) onto the visible canvas.
+//   4. keeping the photo only where the result is opaque.
 // Changing a setting only redoes step 1, brush strokes are kept as a list
 // (replayed when needed), and framing is just a transform, so settings,
 // strokes and framing can all change in any order without losing anything.
@@ -51,12 +53,22 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
   const undoButton = toolbar.querySelector(".undo");
   const redoButton = toolbar.querySelector(".redo");
 
-  const FULL = { x: 0, y: 0, w: width, h: height };
-  const DEFAULT_FRAME = { rotation: 0, flip: false, crop: FULL };
+  // Framing. The "view" is the photo turned by `rotation` (90° steps) plus
+  // `angle` (fine straightening, -45° to 45°), then mirrored if `flip`, with
+  // its origin at the photo's centre. Both turns are clockwise as seen on
+  // screen. `crop` is an upright rectangle in the view, always inside the
+  // turned photo, so a result never has empty corners.
+  const turnedSize = (rotation) => (rotation % 180 ? [height, width] : [width, height]);
+  // The view's full extent at a rotation, ignoring the fine angle.
+  function fullRect(rotation) {
+    const [w, h] = turnedSize(rotation);
+    return { x: -w / 2, y: -h / 2, w, h };
+  }
+  const DEFAULT_FRAME = { rotation: 0, angle: 0, flip: false, crop: fullRect(0) };
 
   let options = { ...DEFAULTS };
   let strokes = []; // { mode, size (px), points: [[x, y], ...] } in photo pixels
-  let frame = DEFAULT_FRAME; // crop is in photo pixels; rotation in degrees clockwise
+  let frame = DEFAULT_FRAME;
   let tool = "off"; // "off" (compare), "erase", "restore" or "crop"
   const brush = { size: 4 }; // % of the photo's longer side
 
@@ -64,37 +76,40 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
   let position = 0; // index in history of the current state
 
   const small = new OffscreenCanvas(maskWidth, maskHeight); // cleaned mask
-  const layers = {
-    erased: new OffscreenCanvas(preview.width, preview.height),
-    restored: new OffscreenCanvas(preview.width, preview.height),
-  };
-  const work = new OffscreenCanvas(preview.width, preview.height); // the unframed cut-out
+  let layers = null; // preview-sized { erased, restored }, made on the first stroke
+  const brushLayers = () =>
+    (layers ??= {
+      erased: new OffscreenCanvas(preview.width, preview.height),
+      restored: new OffscreenCanvas(preview.width, preview.height),
+    });
 
   // ---- Framing ----
 
-  // Size of the framed output.
+  // Size of the framed output, in whole pixels inside the crop.
   function outputSize(f) {
-    return f.rotation % 180 ? [f.crop.h, f.crop.w] : [f.crop.w, f.crop.h];
+    return [Math.max(1, Math.floor(f.crop.w + 1e-6)), Math.max(1, Math.floor(f.crop.h + 1e-6))];
   }
 
-  // Maps photo pixels to framed output pixels: crop, then rotate, then flip
-  // (in output space, so "flip" always mirrors what you see).
-  function matrix(f) {
-    const { x, y, w, h } = f.crop;
-    const [outWidth] = outputSize(f);
+  // Photo pixels → view coordinates. Mirroring is applied last, which would
+  // reverse the apparent direction of the turn, so the turn is reversed too.
+  function viewMatrix(f) {
+    const turn = f.rotation + f.angle;
     let m = new DOMMatrix();
-    if (f.flip) m = m.translate(outWidth, 0).scale(-1, 1);
-    if (f.rotation === 90) m = m.translate(h, 0).rotate(90);
-    else if (f.rotation === 180) m = m.translate(w, h).rotate(180);
-    else if (f.rotation === 270) m = m.translate(0, w).rotate(270);
-    return m.translate(-x, -y);
+    if (f.flip) m = m.scale(-1, 1);
+    return m.rotate(f.flip ? -turn : turn).translate(-width / 2, -height / 2);
   }
 
-  // While cropping, show the whole photo in the draft orientation, with the
-  // crop box on top. Otherwise show the committed frame.
+  // Photo pixels → framed output pixels.
+  function matrix(f) {
+    return new DOMMatrix().translate(-f.crop.x, -f.crop.y).multiply(viewMatrix(f));
+  }
+
+  // While cropping, show the whole turned photo (at its 90° rotation, with
+  // the fine angle's corners cut off), with the crop box on top. Otherwise
+  // show the committed frame.
   let draft = null;
   let aspect = "free";
-  const viewFrame = () => (tool === "crop" ? { ...draft, crop: FULL } : frame);
+  const viewFrame = () => (tool === "crop" ? { ...draft, crop: fullRect(draft.rotation) } : frame);
 
   // ---- Rendering ----
 
@@ -105,15 +120,16 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
     small.getContext("2d").putImageData(new ImageData(rgba, maskWidth, maskHeight), 0, 0);
   }
 
-  function composite() {
-    const ctx = work.getContext("2d");
+  // Draw the cut-out onto `ctx`, whose transform maps preview pixels to
+  // its own pixels. Every source is in preview pixels.
+  function drawCutout(ctx) {
     ctx.imageSmoothingQuality = "high";
-    ctx.globalCompositeOperation = "copy";
     ctx.drawImage(small, 0, 0, preview.width, preview.height);
-    ctx.globalCompositeOperation = "source-over";
-    ctx.drawImage(layers.restored, 0, 0);
-    ctx.globalCompositeOperation = "destination-out";
-    ctx.drawImage(layers.erased, 0, 0);
+    if (layers) {
+      ctx.drawImage(layers.restored, 0, 0);
+      ctx.globalCompositeOperation = "destination-out";
+      ctx.drawImage(layers.erased, 0, 0);
+    }
     ctx.globalCompositeOperation = "source-in";
     ctx.drawImage(preview, 0, 0);
     ctx.globalCompositeOperation = "source-over";
@@ -129,9 +145,9 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
     const viewHeight = Math.max(1, Math.round(outHeight * scale));
     // Preview pixels → photo pixels → framed photo pixels → screen pixels.
     const m = new DOMMatrix().scale(scale).multiply(matrix(f)).scale(1 / scale);
-    const targets = [[canvas, work]];
-    if (!same(f, beforeFrame)) targets.push([before, preview]);
-    for (const [target, source] of targets) {
+    const targets = [[canvas, drawCutout]];
+    if (!same(f, beforeFrame)) targets.push([before, (ctx) => ctx.drawImage(preview, 0, 0)]);
+    for (const [target, draw] of targets) {
       if (target.width !== viewWidth || target.height !== viewHeight) {
         target.width = viewWidth;
         target.height = viewHeight;
@@ -140,7 +156,7 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, viewWidth, viewHeight);
       ctx.setTransform(m);
-      ctx.drawImage(source, 0, 0);
+      draw(ctx);
       ctx.setTransform(1, 0, 0, 1, 0, 0);
     }
     beforeFrame = f;
@@ -150,14 +166,13 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
 
   // Coalesce redraws to one per frame. Fall back to a timer when frames
   // aren't running (e.g. a background tab), so state never goes stale.
-  const WORK = { present: 1, composite: 2, refine: 3 };
+  const WORK = { present: 1, composite: 1, refine: 2 };
   let pending = 0;
   function run() {
     if (!pending) return;
     const todo = pending;
     pending = 0;
     if (todo >= WORK.refine) refine();
-    if (todo >= WORK.composite) composite();
     present();
   }
   function schedule(kind) {
@@ -173,7 +188,7 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
   // Paint one segment of a stroke (in photo pixels) onto a pair of layers
   // drawn at `layerScale`. Each stroke is drawn on its own layer and cleared
   // from the other, so the latest stroke over a spot wins.
-  function paint(stroke, from, to, target = layers, layerScale = scale) {
+  function paint(stroke, from, to, target = brushLayers(), layerScale = scale) {
     const [on, off] = stroke.mode === "erase" ? [target.erased, target.restored] : [target.restored, target.erased];
     for (const [layer, op] of [
       [on, "source-over"],
@@ -201,7 +216,15 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
     }
   }
 
-  function replay(target = layers, layerScale = scale) {
+  // Redraw all strokes onto the preview layers (dropping them when there are
+  // no strokes).
+  function replay() {
+    if (strokes.length === 0) {
+      layers = null;
+      return;
+    }
+    const target = brushLayers();
+    const layerScale = scale;
     for (const layer of Object.values(target)) {
       const ctx = layer.getContext("2d");
       ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -327,49 +350,92 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
 
   // ---- Crop, rotate and flip ----
 
-  // The draft crop box in view (oriented, uncropped) pixels.
-  function draftBox() {
-    const m = matrix({ ...draft, crop: FULL });
-    const { x, y, w, h } = draft.crop;
-    const a = m.transformPoint(new DOMPoint(x, y));
-    const b = m.transformPoint(new DOMPoint(x + w, y + h));
-    return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(b.x - a.x), h: Math.abs(b.y - a.y) };
+  // Whether a view rectangle lies inside the turned photo.
+  function insidePhoto(f, rect) {
+    const inverse = viewMatrix(f).inverse();
+    const tolerance = 0.5; // px, for rounding
+    for (const [x, y] of [
+      [rect.x, rect.y],
+      [rect.x + rect.w, rect.y],
+      [rect.x, rect.y + rect.h],
+      [rect.x + rect.w, rect.y + rect.h],
+    ]) {
+      const p = inverse.transformPoint(new DOMPoint(x, y));
+      if (p.x < -tolerance || p.y < -tolerance || p.x > width + tolerance || p.y > height + tolerance) return false;
+    }
+    return true;
   }
 
-  // Set the draft crop from a box in view pixels.
-  function setDraftBox(box) {
-    const inverse = matrix({ ...draft, crop: FULL }).inverse();
-    const a = inverse.transformPoint(new DOMPoint(box.x, box.y));
-    const b = inverse.transformPoint(new DOMPoint(box.x + box.w, box.y + box.h));
-    const x = clamp(Math.round(Math.min(a.x, b.x)), 0, width - 1);
-    const y = clamp(Math.round(Math.min(a.y, b.y)), 0, height - 1);
-    draft = {
-      ...draft,
-      crop: {
-        x,
-        y,
-        w: clamp(Math.round(Math.abs(b.x - a.x)), 1, width - x),
-        h: clamp(Math.round(Math.abs(b.y - a.y)), 1, height - y),
-      },
+  // Shrink a rectangle about its centre until it fits inside the turned
+  // photo, first moving the centre towards the photo's if even a tiny one
+  // wouldn't fit there. Keeps the rectangle's shape.
+  function fitInside(f, rect) {
+    if (insidePhoto(f, rect)) return rect;
+    const cx = rect.x + rect.w / 2;
+    const cy = rect.y + rect.h / 2;
+    const at = (size, pull) => {
+      const w = rect.w * size;
+      const h = rect.h * size;
+      return { x: cx * (1 - pull) - w / 2, y: cy * (1 - pull) - h / 2, w, h };
     };
+    let pull = 0;
+    if (!insidePhoto(f, at(1e-3, 0))) pull = search((t) => insidePhoto(f, at(1e-3, t)), false);
+    return at(search((t) => insidePhoto(f, at(t, pull)), true), pull);
+  }
+
+  // The furthest step from rectangle `from` (inside) towards `to` that stays
+  // inside the turned photo.
+  function towards(f, from, to) {
+    if (insidePhoto(f, to)) return to;
+    const lerp = (t) => ({
+      x: from.x + (to.x - from.x) * t,
+      y: from.y + (to.y - from.y) * t,
+      w: from.w + (to.w - from.w) * t,
+      h: from.h + (to.h - from.h) * t,
+    });
+    return lerp(search((t) => insidePhoto(f, lerp(t)), true));
+  }
+
+  // The crop the straighten dial shrinks from: the last crop you chose. Turning
+  // the dial shrinks it to fit, and turning back restores it.
+  let straightenFrom = null;
+
+  // Set the draft crop (a view rectangle). Choices other than the dial also
+  // become what the dial shrinks from.
+  function setDraftCrop(crop, { fromDial = false } = {}) {
+    draft = { ...draft, crop };
+    if (!fromDial) straightenFrom = crop;
     placeCropBox();
   }
 
+  // The draft crop as a box relative to the view's top-left, and back. The
+  // crop box handles and aspect presets work in these.
+  function draftBox() {
+    const full = fullRect(draft.rotation);
+    return { x: draft.crop.x - full.x, y: draft.crop.y - full.y, w: draft.crop.w, h: draft.crop.h };
+  }
+  function boxToCrop(box) {
+    const full = fullRect(draft.rotation);
+    return { x: box.x + full.x, y: box.y + full.y, w: box.w, h: box.h };
+  }
+
   function placeCropBox() {
-    const [viewWidth, viewHeight] = outputSize({ ...draft, crop: FULL });
+    const full = fullRect(draft.rotation);
     const box = draftBox();
-    cropBox.style.left = `${(box.x / viewWidth) * 100}%`;
-    cropBox.style.top = `${(box.y / viewHeight) * 100}%`;
-    cropBox.style.width = `${(box.w / viewWidth) * 100}%`;
-    cropBox.style.height = `${(box.h / viewHeight) * 100}%`;
+    cropBox.style.left = `${(box.x / full.w) * 100}%`;
+    cropBox.style.top = `${(box.y / full.h) * 100}%`;
+    cropBox.style.width = `${(box.w / full.w) * 100}%`;
+    cropBox.style.height = `${(box.h / full.h) * 100}%`;
     const [outWidth, outHeight] = outputSize(draft);
     cropSize.textContent = `${outWidth} × ${outHeight}`;
+    angleInput.value = draft.angle;
+    angleReset.textContent = formatAngle(draft.angle);
   }
 
   function ratioFor(name) {
     const value = ASPECTS[name];
     if (value !== "original") return value;
-    const [w, h] = outputSize({ ...draft, crop: FULL });
+    const [w, h] = turnedSize(draft.rotation);
     return w / h;
   }
 
@@ -398,75 +464,102 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
     const ratio = ratioFor(name);
     cropBox.classList.toggle("locked", ratio !== null);
     if (ratio === null) return;
-    const [viewWidth, viewHeight] = outputSize({ ...draft, crop: FULL });
-    // The largest box of this shape, centred where the current box is.
+    // The largest box of this shape, centred where the current box is, that
+    // fits inside the turned photo.
+    const full = fullRect(draft.rotation);
     const box = draftBox();
-    const largest = fitToRatio({ x: 0, y: 0, w: viewWidth, h: viewHeight }, ratio, viewWidth, viewHeight);
-    setDraftBox({
+    const largest = fitToRatio({ x: 0, y: 0, w: full.w, h: full.h }, ratio, full.w, full.h);
+    const centred = {
       ...largest,
-      x: clamp(box.x + box.w / 2 - largest.w / 2, 0, viewWidth - largest.w),
-      y: clamp(box.y + box.h / 2 - largest.h / 2, 0, viewHeight - largest.h),
-    });
+      x: clamp(box.x + box.w / 2 - largest.w / 2, 0, full.w - largest.w),
+      y: clamp(box.y + box.h / 2 - largest.h / 2, 0, full.h - largest.h),
+    };
+    setDraftCrop(fitInside(draft, boxToCrop(centred)));
   }
 
+  // Turn by 90° (clockwise for positive), taking the crop with it.
   function rotateBy(degrees) {
-    // With a flip applied, the photo turns the other way underneath.
-    const delta = draft.flip ? -degrees : degrees;
-    draft = { ...draft, rotation: (draft.rotation + delta + 360) % 360 };
+    const turn = (r) =>
+      degrees > 0 ? { x: -(r.y + r.h), y: r.x, w: r.h, h: r.w } : { x: r.y, y: -(r.x + r.w), w: r.h, h: r.w };
+    draft = { ...draft, rotation: (draft.rotation + degrees + 360) % 360, crop: turn(draft.crop) };
+    straightenFrom = turn(straightenFrom);
     present();
     if (aspect !== "free") setAspect(aspect);
   }
 
+  // Mirror what's shown, crop included. Mirroring also reverses the turn.
   function flip() {
-    draft = { ...draft, flip: !draft.flip };
+    const mirror = (r) => ({ ...r, x: -(r.x + r.w) });
+    draft = {
+      ...draft,
+      flip: !draft.flip,
+      rotation: (360 - draft.rotation) % 360,
+      angle: -draft.angle || 0,
+      crop: mirror(draft.crop),
+    };
+    straightenFrom = mirror(straightenFrom);
+    present();
+  }
+
+  // Straighten by a fine angle. The crop shrinks to keep the corners filled.
+  function setAngle(value) {
+    const angle = clamp(Math.round(value * 10) / 10, -45, 45) || 0;
+    draft = { ...draft, angle };
+    setDraftCrop(fitInside(draft, straightenFrom), { fromDial: true });
     present();
   }
 
   // Crop to the cut-out's bounds (anything at least slightly opaque), plus
   // padding, matching the aspect ratio if one is set.
   function fitToSubject() {
-    composite(); // make sure the work canvas is current
-    const { width: pw, height: ph } = work;
-    const data = work.getContext("2d").getImageData(0, 0, pw, ph).data;
-    let minX = pw;
-    let minY = ph;
-    let maxX = -1;
-    let maxY = -1;
+    // Draw the unframed cut-out at preview size, just for this.
+    run();
+    const { width: pw, height: ph } = preview;
+    const scratch = new OffscreenCanvas(pw, ph);
+    const scratchContext = scratch.getContext("2d", { willReadFrequently: true });
+    drawCutout(scratchContext);
+    const data = scratchContext.getImageData(0, 0, pw, ph).data;
+    scratch.width = scratch.height = 0;
+    // Bounds of the opaque preview pixels' centres, in view coordinates.
+    const { a, b, c, d, e, f } = viewMatrix(draft).multiply(new DOMMatrix().scale(1 / scale));
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
     for (let y = 0; y < ph; y++) {
       const row = y * pw * 4;
       for (let x = 0; x < pw; x++) {
-        if (data[row + x * 4 + 3] > 16) {
-          if (x < minX) minX = x;
-          if (x > maxX) maxX = x;
-          if (y < minY) minY = y;
-          if (y > maxY) maxY = y;
-        }
+        if (data[row + x * 4 + 3] <= 16) continue;
+        const vx = a * (x + 0.5) + c * (y + 0.5) + e;
+        const vy = b * (x + 0.5) + d * (y + 0.5) + f;
+        if (vx < minX) minX = vx;
+        if (vx > maxX) maxX = vx;
+        if (vy < minY) minY = vy;
+        if (vy > maxY) maxY = vy;
       }
     }
-    if (maxX < 0) return; // nothing to fit to
-    // Preview pixels → photo pixels, rounding outwards.
-    minX = Math.floor(minX / scale);
-    minY = Math.floor(minY / scale);
-    maxX = Math.min(width - 1, Math.ceil((maxX + 1) / scale) - 1);
-    maxY = Math.min(height - 1, Math.ceil((maxY + 1) / scale) - 1);
-    const pad = Math.round(0.04 * Math.max(maxX - minX, maxY - minY));
-    const x = Math.max(0, minX - pad);
-    const y = Math.max(0, minY - pad);
-    draft = {
-      ...draft,
-      crop: { x, y, w: Math.min(width, maxX + 1 + pad) - x, h: Math.min(height, maxY + 1 + pad) - y },
+    if (minX > maxX) return; // nothing to fit to
+    const pad = 0.04 * Math.max(maxX - minX, maxY - minY) + 1 / scale;
+    const full = fullRect(draft.rotation);
+    const x0 = Math.max(full.x, minX - pad);
+    const y0 = Math.max(full.y, minY - pad);
+    let crop = {
+      x: x0,
+      y: y0,
+      w: Math.min(full.x + full.w, maxX + pad) - x0,
+      h: Math.min(full.y + full.h, maxY + pad) - y0,
     };
     const ratio = ratioFor(aspect);
     if (ratio !== null) {
-      const [viewWidth, viewHeight] = outputSize({ ...draft, crop: FULL });
-      setDraftBox(fitToRatio(draftBox(), ratio, viewWidth, viewHeight));
-    } else {
-      placeCropBox();
+      const box = { ...crop, x: crop.x - full.x, y: crop.y - full.y };
+      crop = boxToCrop(fitToRatio(box, ratio, full.w, full.h));
     }
+    setDraftCrop(fitInside(draft, crop));
   }
 
   function startCrop() {
     draft = frame;
+    straightenFrom = frame.crop;
     aspect = "free";
     toolbar.querySelectorAll("[data-aspect]").forEach((button) => {
       button.setAttribute("aria-checked", String(button.dataset.aspect === "free"));
@@ -496,6 +589,11 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
     setMode("off");
   };
 
+  const angleInput = toolbar.querySelector('input[name="angle"]');
+  const angleReset = toolbar.querySelector(".angle-reset");
+  angleInput.addEventListener("input", () => setAngle(Number(angleInput.value)));
+  angleReset.addEventListener("click", () => setAngle(0));
+
   toolbar.querySelectorAll("[data-aspect]").forEach((button) => {
     button.addEventListener("click", () => setAspect(button.dataset.aspect));
   });
@@ -506,7 +604,8 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
   toolbar.querySelector(".done").addEventListener("click", doneCrop);
   toolbar.querySelector(".cancel").addEventListener("click", cancelCrop);
 
-  // Dragging the crop box (move) or its handles (resize), in view pixels.
+  // Dragging the crop box (move) or its handles (resize), in view pixels,
+  // stopping where the box would leave the turned photo.
   let drag = null;
   cropBox.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) return;
@@ -528,10 +627,9 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
   cropBox.addEventListener("pointermove", (event) => {
     if (!drag) return;
     const [x, y] = toOutput(event);
-    const [viewWidth, viewHeight] = outputSize({ ...draft, crop: FULL });
-    setDraftBox(
-      dragBox(drag.box, drag.handle, x - drag.start[0], y - drag.start[1], ratioFor(aspect), viewWidth, viewHeight),
-    );
+    const full = fullRect(draft.rotation);
+    const moved = dragBox(drag.box, drag.handle, x - drag.start[0], y - drag.start[1], ratioFor(aspect), full.w, full.h);
+    setDraftCrop(towards(draft, boxToCrop(drag.box), boxToCrop(moved)));
   });
 
   const endDrag = () => {
@@ -656,12 +754,7 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
       if (tool === "crop") doneCrop();
       run();
       const original = await loadOriginal();
-      let full = null;
       try {
-        if (strokes.length) {
-          full = { erased: new OffscreenCanvas(width, height), restored: new OffscreenCanvas(width, height) };
-          replay(full, 1);
-        }
         const [outWidth, outHeight] = outputSize(frame);
         const out = document.createElement("canvas");
         out.width = outWidth;
@@ -670,10 +763,11 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
         ctx.imageSmoothingQuality = "high";
         ctx.setTransform(matrix(frame));
         ctx.drawImage(small, 0, 0, width, height);
-        if (full) {
-          ctx.drawImage(full.restored, 0, 0);
-          ctx.globalCompositeOperation = "destination-out";
-          ctx.drawImage(full.erased, 0, 0);
+        // Brush strokes go straight onto the result, in order, so the latest
+        // over a spot wins, as on screen, without full-size brush layers.
+        for (const stroke of strokes) {
+          ctx.globalCompositeOperation = stroke.mode === "erase" ? "destination-out" : "source-over";
+          traceStroke(ctx, stroke);
         }
         ctx.globalCompositeOperation = "source-in";
         ctx.drawImage(original, 0, 0);
@@ -687,14 +781,12 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
         return out;
       } finally {
         original.close();
-        if (full) for (const layer of Object.values(full)) layer.width = layer.height = 0;
       }
     },
   };
   current ??= editor;
 
   refine();
-  composite();
   present();
   sync();
   setBrushSize(brush.size);
@@ -703,6 +795,43 @@ export function createEditor(item, { mask, maskWidth, maskHeight, preview, width
   panel.hidden = false;
 
   return editor;
+}
+
+// Binary search on [0, 1] for the boundary of a predicate that's true on
+// one side: the largest true t if `ascending`, else the smallest true t.
+function search(ok, ascending) {
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 24; i++) {
+    const mid = (lo + hi) / 2;
+    if (ok(mid) === ascending) lo = mid;
+    else hi = mid;
+  }
+  return ascending ? lo : hi;
+}
+
+function formatAngle(angle) {
+  const sign = angle > 0 ? "+" : angle < 0 ? "−" : "";
+  return `${sign}${Math.abs(angle).toFixed(1)}°`;
+}
+
+// Draw a whole brush stroke (in the context's current coordinates).
+function traceStroke(ctx, { points, size }) {
+  ctx.beginPath();
+  if (points.length === 1) {
+    // A zero-length line draws nothing, even with round caps: use a dot.
+    ctx.arc(points[0][0], points[0][1], size / 2, 0, 2 * Math.PI);
+    ctx.fillStyle = "#000";
+    ctx.fill();
+    return;
+  }
+  ctx.moveTo(...points[0]);
+  for (const point of points.slice(1)) ctx.lineTo(...point);
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.lineWidth = size;
+  ctx.strokeStyle = "#000";
+  ctx.stroke();
 }
 
 // Resize or move a box (in view pixels) by a drag of (dx, dy) on one of its

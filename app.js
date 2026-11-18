@@ -79,10 +79,26 @@ function getWorker() {
   return worker;
 }
 
+// Photos added but not yet finished. When it drops to zero on a phone, the
+// model is unloaded (see releaseModel).
+let outstanding = 0;
+
+// Shut the model's worker down, giving back all its memory (on the GPU too).
+// The next photo starts a new one, which loads the model from the browser's
+// cache in a second or two. Worth it on phones, where memory is tight while
+// editing results; on desktop the model stays loaded for speed.
+function releaseModel() {
+  worker?.terminate();
+  worker = null;
+  downloads.clear();
+}
+
 function finish(id, result, error) {
   const job = jobs.get(id);
   if (!job) return;
   jobs.delete(id);
+  outstanding--;
+  if (outstanding === 0 && TOUCH) releaseModel();
   const { item, file } = job;
   item.querySelector(".pending")?.remove();
   const info = item.querySelector(".info");
@@ -125,7 +141,9 @@ function finish(id, result, error) {
 // ~50 MB once decoded. So decode each photo once, keep only a preview for
 // the screen and a smaller copy for the model, and let the original go; the
 // editor re-reads the file when downloading.
-const PREVIEW_SIZE = 1600; // longest side, px
+// Phones get smaller previews (still sharper than a card on a phone screen).
+const TOUCH = matchMedia("(pointer: coarse)").matches;
+const PREVIEW_SIZE = TOUCH ? 1200 : 1600; // longest side, px
 const MODEL_SIZE = 1024; // shortest side the model needs, px (it works at 1024 × 1024)
 
 function scaled(source, scale) {
@@ -174,6 +192,7 @@ function enqueue(file, example = null) {
   applyBackground(item);
   results.prepend(item);
   exampleCard.hidden = true; // results take its place
+  outstanding++;
 
   queue = queue.then(
     () =>
@@ -192,7 +211,14 @@ function enqueue(file, example = null) {
             before.getContext("2d").drawImage(preview, 0, 0);
             getWorker().postMessage({ id, image: modelInput }, [modelInput]);
           },
-          () => finish(id, null, "Couldn't read this image"),
+          () =>
+            finish(
+              id,
+              null,
+              /\.hei[cf]$/i.test(file.name) || /hei[cf]/i.test(file.type)
+                ? "This browser can't open HEIC photos. Try Safari, or export it as JPEG."
+                : "Couldn't read this image",
+            ),
         );
       }),
   );
